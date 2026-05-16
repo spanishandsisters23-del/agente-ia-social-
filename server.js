@@ -6,7 +6,6 @@ const path = require("path");
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "mi_token_secreto";
