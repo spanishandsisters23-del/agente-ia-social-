@@ -13,7 +13,7 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "mi_token_secreto";
 
 // ── Página principal ──────────────────────────────────────────────
 app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
+  res.send("Agente IA funcionando correctamente ✅");
 });
 
 // ── Llamar a Claude ───────────────────────────────────────────────
