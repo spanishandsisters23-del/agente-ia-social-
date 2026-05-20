@@ -11,9 +11,14 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "miagente2024";
 const SHOPIFY_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const SHOPIFY_URL = process.env.SHOPIFY_STORE_URL || "shop.spanishandsisters.com";
 
-async function shopifyFetch(endpoint) {
-  const res = await fetch(`https://${SHOPIFY_URL}/admin/api/2024-01/${endpoint}`, {
-    headers: { "X-Shopify-Access-Token": SHOPIFY_TOKEN, "Content-Type": "application/json" },
+async function shopifyGraphQL(query) {
+  const res = await fetch(`https://${SHOPIFY_URL}/admin/api/2024-01/graphql.json`, {
+    method: "POST",
+    headers: {
+      "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query }),
   });
   return res.json();
 }
@@ -32,28 +37,80 @@ app.get("/", (req, res) => res.send("Agente IA Spanish & Sisters funcionando cor
 
 app.get("/api/shopify/resumen", async (req, res) => {
   try {
-    const [ordersData, productsData, customersData] = await Promise.all([
-      shopifyFetch("orders.json?status=any&limit=50&fields=id,total_price,created_at,financial_status,line_items,customer"),
-      shopifyFetch("products.json?limit=50&fields=id,title,variants,product_type,status"),
-      shopifyFetch("customers.json?limit=50&fields=id,first_name,last_name,email,orders_count,total_spent,created_at"),
-    ]);
-    const orders = ordersData.orders || [];
-    const products = productsData.products || [];
-    const customers = customersData.customers || [];
-    const totalVentas = orders.reduce((sum, o) => sum + parseFloat(o.total_price || 0), 0);
+    const data = await shopifyGraphQL(`{
+      orders(first: 50, reverse: true) {
+        edges { node {
+          id name totalPriceSet { shopMoney { amount } }
+          createdAt displayFinancialStatus
+          customer { firstName lastName email }
+          lineItems(first: 5) { edges { node { title quantity } } }
+        }}
+      }
+      products(first: 50) {
+        edges { node { id title productType status } }
+      }
+      customers(first: 50, reverse: true) {
+        edges { node {
+          id firstName lastName email
+          numberOfOrders
+          amountSpent { amount }
+          createdAt
+        }}
+      }
+    }`);
+
+    if (data.errors) {
+      return res.status(500).json({ error: data.errors[0].message });
+    }
+
+    const orders = (data.data?.orders?.edges || []).map(e => e.node);
+    const products = (data.data?.products?.edges || []).map(e => e.node);
+    const customers = (data.data?.customers?.edges || []).map(e => e.node);
+
+    const totalVentas = orders.reduce((sum, o) => sum + parseFloat(o.totalPriceSet?.shopMoney?.amount || 0), 0);
     const ticketMedio = orders.length > 0 ? totalVentas / orders.length : 0;
-    const clientesVIP = customers.filter(c => parseFloat(c.total_spent) > 200);
+    const clientesVIP = customers.filter(c => parseFloat(c.amountSpent?.amount || 0) > 200);
+
     const productCount = {};
-    orders.forEach(o => (o.line_items || []).forEach(item => { productCount[item.title] = (productCount[item.title] || 0) + item.quantity; }));
+    orders.forEach(o => (o.lineItems?.edges || []).forEach(e => {
+      const item = e.node;
+      productCount[item.title] = (productCount[item.title] || 0) + item.quantity;
+    }));
     const topProductos = Object.entries(productCount).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([title, qty]) => ({ title, qty }));
+
     res.json({
-      metricas: { totalPedidos: orders.length, totalVentas: totalVentas.toFixed(2), ticketMedio: ticketMedio.toFixed(2), totalClientes: customers.length, clientesVIP: clientesVIP.length, totalProductos: products.length },
+      metricas: {
+        totalPedidos: orders.length,
+        totalVentas: totalVentas.toFixed(2),
+        ticketMedio: ticketMedio.toFixed(2),
+        totalClientes: customers.length,
+        clientesVIP: clientesVIP.length,
+        totalProductos: products.length,
+      },
       topProductos,
-      ultimosPedidos: orders.slice(0, 5).map(o => ({ id: o.id, total: o.total_price, fecha: o.created_at, estado: o.financial_status, cliente: o.customer ? `${o.customer.first_name} ${o.customer.last_name}` : "Anónimo" })),
-      clientesVIP: clientesVIP.slice(0, 5).map(c => ({ nombre: `${c.first_name} ${c.last_name}`, email: c.email, pedidos: c.orders_count, gasto: c.total_spent })),
-      clientesRecuperar: customers.filter(c => c.orders_count > 0).slice(0, 5).map(c => ({ nombre: `${c.first_name} ${c.last_name}`, email: c.email, pedidos: c.orders_count, gasto: c.total_spent })),
+      ultimosPedidos: orders.slice(0, 5).map(o => ({
+        id: o.name,
+        total: o.totalPriceSet?.shopMoney?.amount,
+        fecha: o.createdAt,
+        estado: o.displayFinancialStatus,
+        cliente: o.customer ? `${o.customer.firstName} ${o.customer.lastName}` : "Anónimo",
+      })),
+      clientesVIP: clientesVIP.slice(0, 5).map(c => ({
+        nombre: `${c.firstName} ${c.lastName}`,
+        email: c.email,
+        pedidos: c.numberOfOrders,
+        gasto: c.amountSpent?.amount,
+      })),
+      clientesRecuperar: customers.filter(c => parseInt(c.numberOfOrders) > 0).slice(0, 5).map(c => ({
+        nombre: `${c.firstName} ${c.lastName}`,
+        email: c.email,
+        pedidos: c.numberOfOrders,
+        gasto: c.amountSpent?.amount,
+      })),
     });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post("/api/informe-diario", async (req, res) => {
@@ -90,7 +147,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
     const message = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!message || message.type !== "text") return;
     const phoneNumberId = req.body.entry[0].changes[0].value.metadata.phone_number_id;
-    const reply = await callClaude(process.env.AGENT_INSTRUCTIONS || "Eres agente de Spanish & Sisters. Responde en español, tono elegante, máx 3-4 frases. Firma como 'El equipo de Spanish & Sisters'.", message.text.body, 400);
+    const reply = await callClaude(process.env.AGENT_INSTRUCTIONS || "Eres agente de Spanish & Sisters. Responde en español, tono elegante, máx 3-4 frases.", message.text.body, 400);
     await fetch(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` }, body: JSON.stringify({ messaging_product: "whatsapp", to: message.from, type: "text", text: { body: reply } }) });
   } catch (err) { console.error("Error WA:", err.message); }
 });
